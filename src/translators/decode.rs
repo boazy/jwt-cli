@@ -1,9 +1,7 @@
 use crate::cli_config::{translate_algorithm, DecodeArgs};
+use crate::keys::{decoding_key_from_jwks_secret, get_secret_from_file_or_input, SecretType};
 use crate::translators::Payload;
-use crate::utils::{
-    decoding_key_from_jwks_secret, get_secret_from_file_or_input, write_file, JWTError, JWTResult,
-    SecretType,
-};
+use crate::utils::{write_file, JWTError, JWTResult};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Header, TokenData, Validation};
 use serde_derive::{Deserialize, Serialize};
@@ -35,15 +33,16 @@ impl TokenOutput {
 }
 
 pub fn decoding_key_from_secret(
-    alg: &Algorithm,
+    alg: Algorithm,
     secret_string: &str,
     header: Option<Header>,
 ) -> JWTResult<DecodingKey> {
-    let (secret, file_type) = get_secret_from_file_or_input(alg, secret_string);
+    let (secret, file_type) = get_secret_from_file_or_input(alg, secret_string)?;
     match alg {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => match file_type {
             SecretType::Plain => Ok(DecodingKey::from_secret(&secret)),
-            SecretType::Jwks => decoding_key_from_jwks_secret(&secret, header),
+            SecretType::Jwk => decoding_key_from_jwks_secret(false, &secret, header, alg),
+            SecretType::Jwks => decoding_key_from_jwks_secret(true, &secret, header, alg),
             SecretType::B64 => DecodingKey::from_base64_secret(from_utf8(&secret)?)
                 .map_err(jsonwebtoken::errors::Error::into),
             _ => Err(JWTError::Internal(format!(
@@ -55,36 +54,30 @@ pub fn decoding_key_from_secret(
         | Algorithm::RS512
         | Algorithm::PS256
         | Algorithm::PS384
-        | Algorithm::PS512 => match file_type {
-            SecretType::Pem => {
-                DecodingKey::from_rsa_pem(&secret).map_err(jsonwebtoken::errors::Error::into)
-            }
-            SecretType::Der => Ok(DecodingKey::from_rsa_der(&secret)),
-            SecretType::Jwks => decoding_key_from_jwks_secret(&secret, header),
-            _ => Err(JWTError::Internal(format!(
-                "Invalid secret file type for {alg:?}"
-            ))),
-        },
-        Algorithm::ES256 | Algorithm::ES384 => match file_type {
-            SecretType::Pem => {
-                DecodingKey::from_ec_pem(&secret).map_err(jsonwebtoken::errors::Error::into)
-            }
-            SecretType::Der => Ok(DecodingKey::from_ec_der(&secret)),
-            SecretType::Jwks => decoding_key_from_jwks_secret(&secret, header),
-            _ => Err(JWTError::Internal(format!(
-                "Invalid secret file type for {alg:?}"
-            ))),
-        },
-        Algorithm::EdDSA => match file_type {
-            SecretType::Pem => {
-                DecodingKey::from_ed_pem(&secret).map_err(jsonwebtoken::errors::Error::into)
-            }
-            SecretType::Der => Ok(DecodingKey::from_ed_der(&secret)),
-            SecretType::Jwks => decoding_key_from_jwks_secret(&secret, header),
-            _ => Err(JWTError::Internal(format!(
-                "Invalid secret file type for {alg:?}"
-            ))),
-        },
+        | Algorithm::PS512 => decode_public_key(
+            alg,
+            DecodingKey::from_rsa_pem,
+            DecodingKey::from_rsa_der,
+            file_type,
+            &secret,
+            header,
+        ),
+        Algorithm::ES256 | Algorithm::ES384 => decode_public_key(
+            alg,
+            DecodingKey::from_ec_pem,
+            DecodingKey::from_ec_der,
+            file_type,
+            &secret,
+            header,
+        ),
+        Algorithm::EdDSA => decode_public_key(
+            alg,
+            DecodingKey::from_ed_pem,
+            DecodingKey::from_ed_der,
+            file_type,
+            &secret,
+            header,
+        ),
     }
 }
 
@@ -121,7 +114,7 @@ pub fn decode_token(
     let secret = match arguments.secret.len() {
         0 => None,
         _ => Some(decoding_key_from_secret(
-            &algorithm,
+            algorithm,
             &arguments.secret,
             header,
         )),
@@ -242,4 +235,23 @@ pub fn print_decoded_token(
     }
 
     Ok(())
+}
+
+fn decode_public_key(
+    alg: Algorithm,
+    pem_decoder: impl Fn(&[u8]) -> jsonwebtoken::errors::Result<DecodingKey>,
+    der_decoder: impl Fn(&[u8]) -> DecodingKey,
+    secret_type: SecretType,
+    secret: &[u8],
+    header: Option<Header>,
+) -> JWTResult<DecodingKey> {
+    match secret_type {
+        SecretType::Pem => pem_decoder(secret).map_err(jsonwebtoken::errors::Error::into),
+        SecretType::Der => Ok(der_decoder(secret)),
+        SecretType::Jwk => decoding_key_from_jwks_secret(false, &secret, header, alg),
+        SecretType::Jwks => decoding_key_from_jwks_secret(true, &secret, header, alg),
+        _ => Err(JWTError::Internal(format!(
+            "Invalid secret file type ({secret_type}) for {alg:?}"
+        ))),
+    }
 }

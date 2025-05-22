@@ -11,6 +11,7 @@ use translators::encode::{encode_token, print_encoded_token};
 pub mod cli_config;
 pub mod translators;
 pub mod utils;
+mod keys;
 
 fn warn_unsupported(arguments: &EncodeArgs) {
     if arguments.typ.is_some() {
